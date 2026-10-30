@@ -85,7 +85,7 @@ export default function AdminStudentsPage() {
                 {students.map((s) => (
                   <TableRow key={s.id}>
                     <TableCell className="font-medium">{displayName(s)}</TableCell>
-                    <TableCell className="text-muted-foreground">{s.email}</TableCell>
+                    <TableCell className="text-muted-foreground">{s.phone ?? s.email}</TableCell>
                     <TableCell>{s.school_name?.trim() || "—"}</TableCell>
                     <TableCell>{s.school_class?.trim() || "—"}</TableCell>
                     <TableCell>

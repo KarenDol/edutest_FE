@@ -4,6 +4,7 @@ import dynamic from "next/dynamic"
 import { cn } from "@/lib/utils"
 import { apiAssetUrl } from "@/lib/public-api"
 import type { QuestionMathPayload } from "@/lib/types"
+import { QuestionStem } from "@/components/question-stem"
 
 const MathLiveField = dynamic(
   () => import("@/components/math-live-field").then((m) => m.MathLiveField),
@@ -18,7 +19,8 @@ const MixedMathText = dynamic(
   },
 )
 
-function hasInlineMathDelimiters(s: string): boolean {
+export function hasRenderedMath(s: string | null | undefined): boolean {
+  if (!s) return false
   return s.includes("$") || s.includes("\\(") || s.includes("\\[")
 }
 
@@ -32,18 +34,19 @@ export function MathQuestionStemView({
   className?: string
 }) {
   if (!math) {
-    return <span className={className}>{fallbackText}</span>
+    return <QuestionStem text={fallbackText} className={className} />
   }
   const formula = (math.stem_latex || "").trim()
   const wording = (fallbackText || "").trim()
   const showLegacyStem =
-    Boolean(formula) && (!wording || !hasInlineMathDelimiters(fallbackText))
+    Boolean(formula) && (!wording || !hasRenderedMath(fallbackText))
   return (
     <div className={`space-y-4 ${className ?? ""}`}>
       {wording ? (
-        <MixedMathText
+        <QuestionStem
           text={fallbackText}
-          className="whitespace-pre-wrap text-lg font-medium leading-relaxed text-foreground"
+          math
+          className="text-lg font-medium leading-relaxed text-foreground"
         />
       ) : null}
       {math.image_urls && math.image_urls.length > 0 ? (
@@ -71,7 +74,7 @@ export function MathQuestionStemView({
 }
 
 export function MathOptionReadonly({ latex, className }: { latex: string; className?: string }) {
-  if (hasInlineMathDelimiters(latex)) {
+  if (hasRenderedMath(latex)) {
     return (
       <MixedMathText
         text={latex}

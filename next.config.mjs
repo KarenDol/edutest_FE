@@ -4,9 +4,7 @@ const withNextIntl = createNextIntlPlugin("./i18n/request.ts")
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  // Static export is for production deploys only. With `output: "export"`, Next requires every
-  // visited /[locale]/.../[id] to be listed in generateStaticParams — so real UUIDs break `next dev`.
-  ...(process.env.NODE_ENV === "production" ? { output: "export" } : {}),
+  // Production uses `next start` (PM2) so dynamic routes like /student/tests/[id] work.
   typescript: {
     ignoreBuildErrors: true,
   },

@@ -22,6 +22,7 @@ interface AdminSidebarProps {
   user: {
     name: string | null
     email: string | null
+    phone?: string | null
     role: string
   }
 }
@@ -93,7 +94,7 @@ export function AdminSidebar({ user }: AdminSidebarProps) {
       <div className="p-4">
         <div className="px-4 py-3 mb-2">
           <p className="text-sm font-medium truncate">{user.name || t("admin")}</p>
-          <p className="text-xs text-sidebar-foreground/60 truncate">{user.email}</p>
+          <p className="text-xs text-sidebar-foreground/60 truncate">{user.phone ?? user.email}</p>
         </div>
         <Button
           variant="ghost"

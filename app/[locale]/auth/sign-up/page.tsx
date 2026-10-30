@@ -22,6 +22,8 @@ import { BrandLogo } from '@/components/brand-logo'
 import { XPatternBackdrop } from '@/components/x-pattern-backdrop'
 import { getPublicApiBase } from '@/lib/public-api'
 import { setAccessToken } from '@/lib/auth-token'
+import { formatApiDetail } from '@/lib/api-detail'
+import { TelegramPhoneVerify } from '@/components/auth/telegram-phone-verify'
 
 type EntProfile = 'FIZMAT' | 'CHEMBIO'
 const GRADES = ['9', '10', '11', '12'] as const
@@ -37,7 +39,8 @@ export default function SignUpPage() {
   const [firstName, setFirstName] = useState('')
   const [patronymic, setPatronymic] = useState('')
   const [iin, setIin] = useState('')
-  const [email, setEmail] = useState('')
+  const [verificationToken, setVerificationToken] = useState<string | null>(null)
+  const [verifiedPhone, setVerifiedPhone] = useState('')
   const [schoolClass, setSchoolClass] = useState<(typeof GRADES)[number] | ''>('')
   const [schoolName, setSchoolName] = useState('')
   const [entProfile, setEntProfile] = useState<EntProfile>('FIZMAT')
@@ -51,21 +54,6 @@ export default function SignUpPage() {
     const timer = window.setTimeout(() => setError(null), 5000)
     return () => window.clearTimeout(timer)
   }, [error])
-
-  function formatApiDetail(detail: unknown, fallback: string): string {
-    if (typeof detail === 'string') return detail
-    if (Array.isArray(detail)) {
-      const parts = detail.map((item) => {
-        if (item && typeof item === 'object' && 'msg' in item) {
-          return String((item as { msg: unknown }).msg)
-        }
-        return JSON.stringify(item)
-      })
-      const joined = parts.filter(Boolean).join(' ')
-      return joined || fallback
-    }
-    return fallback
-  }
 
   const onIinChange = (v: string) => {
     const digits = v.replace(/\D/g, '').slice(0, 12)
@@ -95,7 +83,7 @@ export default function SignUpPage() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          email,
+          verification_token: verificationToken,
           password,
           last_name: lastName.trim(),
           first_name: firstName.trim(),
@@ -119,6 +107,7 @@ export default function SignUpPage() {
         }
         setError(errMsg)
         toast.error(errMsg, { duration: 5000 })
+        if (errMsg.startsWith('Phone verification expired')) setVerificationToken(null)
         return
       }
 
@@ -170,6 +159,15 @@ export default function SignUpPage() {
           <CardDescription>{t('signUpSubtitle')}</CardDescription>
         </CardHeader>
         <CardContent>
+          {!verificationToken ? (
+            <TelegramPhoneVerify
+              purpose="register"
+              onVerified={(token, phone) => {
+                setVerificationToken(token)
+                setVerifiedPhone(phone)
+              }}
+            />
+          ) : (
           <form onSubmit={handleSubmit} className="space-y-4">
             {error && (
               <Alert variant="destructive" className="border-destructive">
@@ -237,15 +235,9 @@ export default function SignUpPage() {
             </div>
 
             <div className="space-y-2">
-              <Label htmlFor="email">{t('email')}</Label>
-              <Input
-                id="email"
-                type="email"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                required
-                disabled={loading}
-              />
+              <Label htmlFor="phone">{t('phone')}</Label>
+              <Input id="phone" type="tel" value={verifiedPhone} readOnly disabled />
+              <p className="text-xs text-muted-foreground">{t('phoneVerified')}</p>
             </div>
 
             <div className="space-y-2">
@@ -318,6 +310,7 @@ export default function SignUpPage() {
               )}
             </Button>
           </form>
+          )}
 
           <div className="mt-6 text-center text-sm">
             <span className="text-muted-foreground">{t('hasAccount')} </span>

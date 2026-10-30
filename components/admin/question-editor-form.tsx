@@ -17,8 +17,28 @@ import { Checkbox } from "@/components/ui/checkbox"
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group"
 import { ImagePlus, Plus, X } from "lucide-react"
 import { apiAssetUrl } from "@/lib/public-api"
+import {
+  DEFAULT_QUESTION_DIFFICULTY,
+  QUESTION_DIFFICULTY_OPTIONS,
+  normalizeQuestionDifficulty,
+  type QuestionDifficulty,
+} from "@/lib/question-difficulty"
+import {
+  DEFAULT_QUESTION_LANGUAGE,
+  QUESTION_LANGUAGE_OPTIONS,
+  normalizeQuestionLanguage,
+  type QuestionLanguage,
+} from "@/lib/question-languages"
 import type { Question, Subject } from "@/lib/types"
+import { restoreLiteralNewlines } from "@/lib/text-breaks"
 import { FormulaScratchpad } from "@/components/formula-scratchpad"
+import {
+  assignMatchMapping,
+  dedupeMatchMapping,
+  isRightIndexAvailableForSlot,
+  parseMatchCorrectAnswers,
+  parseMatchOptions,
+} from "@/lib/match-question"
 
 function FormSwitchRow({
   title,
@@ -52,28 +72,55 @@ function emptyDefaults() {
     correctAnswers: [] as number[],
     points: 1,
     imageUrls: [] as string[],
-    shuffleAnswerOptions: false,
-    showCalculator: false,
-    showPeriodicTable: false,
+    language: DEFAULT_QUESTION_LANGUAGE as QuestionLanguage,
+    difficulty: DEFAULT_QUESTION_DIFFICULTY as QuestionDifficulty,
   }
 }
 
+function storedQuestionUsesMath(q: { question_text?: string; math?: { stem_latex?: string; options_latex?: string[] } | null }) {
+  const chunks = [q.question_text, q.math?.stem_latex, ...(q.math?.options_latex ?? [])]
+  return chunks.some(
+    (part) => typeof part === "string" && (part.includes("$") || part.includes("\\(") || part.includes("\\[")),
+  )
+}
+
 function stateFromQuestion(q: Question & { subjects: Subject | null }) {
-  const opts = [...q.options, ...Array(4 - q.options.length).fill("")]
-  const sliced = opts.slice(0, Math.max(4, q.options.length)) as string[]
   const ca = q.correct_answers as unknown[]
+  if (q.question_type === "match") {
+    const { left, right } = parseMatchOptions(q.options)
+    return {
+      useMathMode: false,
+      questionText: restoreLiteralNewlines(q.question_text),
+      questionType: "match" as const,
+      subjectId: q.subject_id || "",
+      options: ["", "", "", ""] as string[],
+      correctAnswers: [] as number[],
+      matchLeft: left.length > 0 ? left : ["", ""],
+      matchRight: right.length > 0 ? right : ["", "", "", ""],
+      matchCorrect: dedupeMatchMapping(parseMatchCorrectAnswers(ca, left.length || 2)),
+      points: q.points,
+      imageUrls: [] as string[],
+      language: normalizeQuestionLanguage(q.language),
+      difficulty: normalizeQuestionDifficulty(q.difficulty),
+    }
+  }
+  const flatOpts = Array.isArray(q.options) ? q.options : []
+  const opts = [...flatOpts, ...Array(4 - flatOpts.length).fill("")]
+  const sliced = opts.slice(0, Math.max(4, flatOpts.length)) as string[]
   return {
-    useMathMode: Boolean(q.math),
-    questionText: q.question_text,
+    useMathMode: storedQuestionUsesMath(q),
+    questionText: restoreLiteralNewlines(q.question_text),
     questionType: q.question_type,
     subjectId: q.subject_id || "",
     options: sliced,
     correctAnswers: ca.map((x) => (typeof x === "number" ? x : parseInt(String(x), 10))),
+    matchLeft: ["", ""] as string[],
+    matchRight: ["", "", "", ""] as string[],
+    matchCorrect: [-1, -1] as number[],
     points: q.points,
     imageUrls: q.math?.image_urls ? [...q.math.image_urls] : [],
-    shuffleAnswerOptions: Boolean(q.shuffle_answer_options),
-    showCalculator: Boolean(q.show_calculator),
-    showPeriodicTable: Boolean(q.show_periodic_table),
+    language: normalizeQuestionLanguage(q.language),
+    difficulty: normalizeQuestionDifficulty(q.difficulty),
   }
 }
 
@@ -95,16 +142,20 @@ export function QuestionEditorForm({
   layout = "stacked",
 }: QuestionEditorFormProps) {
   const [questionText, setQuestionText] = useState("")
-  const [questionType, setQuestionType] = useState<"single_choice" | "multiple_choice">("single_choice")
+  const [questionType, setQuestionType] = useState<"single_choice" | "multiple_choice" | "match">(
+    "single_choice",
+  )
   const [subjectId, setSubjectId] = useState("")
   const [options, setOptions] = useState<string[]>(["", "", "", ""])
   const [correctAnswers, setCorrectAnswers] = useState<number[]>([])
+  const [matchLeft, setMatchLeft] = useState<string[]>(["", ""])
+  const [matchRight, setMatchRight] = useState<string[]>(["", "", "", ""])
+  const [matchCorrect, setMatchCorrect] = useState<number[]>([-1, -1])
   const [points, setPoints] = useState(1)
   const [useMathMode, setUseMathMode] = useState(false)
   const [imageUrls, setImageUrls] = useState<string[]>([])
-  const [shuffleAnswerOptions, setShuffleAnswerOptions] = useState(false)
-  const [showCalculator, setShowCalculator] = useState(false)
-  const [showPeriodicTable, setShowPeriodicTable] = useState(false)
+  const [language, setLanguage] = useState<QuestionLanguage>(DEFAULT_QUESTION_LANGUAGE)
+  const [difficulty, setDifficulty] = useState<QuestionDifficulty>(DEFAULT_QUESTION_DIFFICULTY)
   const [isLoading, setIsLoading] = useState(false)
   const [formError, setFormError] = useState("")
   const imageInputRef = useRef<HTMLInputElement>(null)
@@ -118,11 +169,13 @@ export function QuestionEditorForm({
       setSubjectId(s.subjectId)
       setOptions(s.options)
       setCorrectAnswers(s.correctAnswers)
+      setMatchLeft(s.matchLeft)
+      setMatchRight(s.matchRight)
+      setMatchCorrect(s.matchCorrect)
       setPoints(s.points)
       setImageUrls(s.imageUrls)
-      setShuffleAnswerOptions(s.shuffleAnswerOptions)
-      setShowCalculator(s.showCalculator)
-      setShowPeriodicTable(s.showPeriodicTable)
+      setLanguage(s.language)
+      setDifficulty(s.difficulty)
     } else {
       const d = emptyDefaults()
       setUseMathMode(d.useMathMode)
@@ -131,11 +184,13 @@ export function QuestionEditorForm({
       setSubjectId(d.subjectId)
       setOptions(d.options)
       setCorrectAnswers(d.correctAnswers)
+      setMatchLeft(["", ""])
+      setMatchRight(["", "", "", ""])
+      setMatchCorrect([-1, -1])
       setPoints(d.points)
       setImageUrls(d.imageUrls)
-      setShuffleAnswerOptions(d.shuffleAnswerOptions)
-      setShowCalculator(d.showCalculator)
-      setShowPeriodicTable(d.showPeriodicTable)
+      setLanguage(d.language)
+      setDifficulty(d.difficulty)
     }
     setFormError("")
   }, [initialQuestion?.id])
@@ -144,6 +199,22 @@ export function QuestionEditorForm({
     const hasStem = questionText.trim().length > 0
     if (!hasStem || !subjectId.trim()) return false
     if (!Number.isFinite(points) || points < 1) return false
+
+    if (questionType === "match") {
+      if (matchLeft.length < 1 || !matchLeft.every((o) => o.trim())) return false
+      if (matchRight.length < 2 || !matchRight.every((o) => o.trim())) return false
+      if (matchCorrect.length !== matchLeft.length) return false
+      if (
+        !matchCorrect.every(
+          (i) => Number.isInteger(i) && i >= 0 && i < matchRight.length,
+        )
+      ) {
+        return false
+      }
+      if (new Set(matchCorrect).size !== matchCorrect.length) return false
+      return true
+    }
+
     if (options.length < 2 || !options.every((o) => o.trim())) return false
     if (correctAnswers.length === 0) return false
     if (!correctAnswers.every((i) => Number.isInteger(i) && i >= 0 && i < options.length)) return false
@@ -151,7 +222,17 @@ export function QuestionEditorForm({
     if (questionType === "multiple_choice" && new Set(correctAnswers).size !== correctAnswers.length)
       return false
     return true
-  }, [questionText, useMathMode, subjectId, points, options, correctAnswers, questionType])
+  }, [
+    questionText,
+    subjectId,
+    points,
+    options,
+    correctAnswers,
+    questionType,
+    matchLeft,
+    matchRight,
+    matchCorrect,
+  ])
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -162,24 +243,39 @@ export function QuestionEditorForm({
     const optsNormalized = options.map((o) => o.trim())
 
     try {
-      const payload = {
-        question_text: questionText.trim(),
-        question_type: questionType,
-        subject_id: subjectId.trim(),
-        options: optsNormalized,
-        correct_answers: correctAnswers,
-        points,
-        math: useMathMode
+      const payload =
+        questionType === "match"
           ? {
-              stem_latex: "",
-              options_latex: optsNormalized,
-              image_urls: imageUrls,
+              question_text: questionText.trim(),
+              question_type: "match" as const,
+              subject_id: subjectId.trim(),
+              options: {
+                left: matchLeft.map((o) => o.trim()),
+                right: matchRight.map((o) => o.trim()),
+              },
+              correct_answers: matchCorrect,
+              points,
+              language,
+              difficulty,
+              math: null,
             }
-          : null,
-        shuffle_answer_options: shuffleAnswerOptions,
-        show_calculator: showCalculator,
-        show_periodic_table: showPeriodicTable,
-      }
+          : {
+              question_text: questionText.trim(),
+              question_type: questionType,
+              subject_id: subjectId.trim(),
+              options: optsNormalized,
+              correct_answers: correctAnswers,
+              points,
+              language,
+              difficulty,
+              math: useMathMode || imageUrls.length > 0
+                ? {
+                    stem_latex: "",
+                    options_latex: optsNormalized,
+                    image_urls: imageUrls,
+                  }
+                : null,
+            }
       if (initialQuestion) {
         await apiClientJson(`/questions/${initialQuestion.id}`, {
           method: "PATCH",
@@ -233,9 +329,6 @@ export function QuestionEditorForm({
 
   const onMathModeChecked = (checked: boolean) => {
     setUseMathMode(checked)
-    if (!checked) {
-      setImageUrls([])
-    }
   }
 
   const handleImagePick = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -264,11 +357,10 @@ export function QuestionEditorForm({
     </div>
   )
 
-  const figuresBlock =
-    useMathMode ? (
+  const figuresBlock = (
       <div className="space-y-2">
         <div className="flex flex-wrap items-center gap-4">
-          <label className="text-sm font-medium">Figures</label>
+          <label className="text-sm font-medium">Picture</label>
           <input
             ref={imageInputRef}
             type="file"
@@ -278,7 +370,7 @@ export function QuestionEditorForm({
           />
           <Button type="button" variant="outline" size="sm" onClick={() => imageInputRef.current?.click()}>
             <ImagePlus className="mr-2 h-4 w-4" />
-            Add image
+            Add picture
           </Button>
         </div>
         {imageUrls.length > 0 ? (
@@ -304,7 +396,7 @@ export function QuestionEditorForm({
           </div>
         ) : null}
       </div>
-    ) : null
+    )
 
   const stemBlock = (
     <div className="space-y-4">
@@ -336,10 +428,17 @@ export function QuestionEditorForm({
       </label>
       <Select
         value={questionType}
-        onValueChange={(v: "single_choice" | "multiple_choice") => {
+        onValueChange={(v: "single_choice" | "multiple_choice" | "match") => {
           setQuestionType(v)
           if (v === "single_choice" && correctAnswers.length > 1) {
             setCorrectAnswers([correctAnswers[0]])
+          }
+          if (v === "match") {
+            setUseMathMode(false)
+            setImageUrls([])
+            if (matchLeft.length < 1) setMatchLeft(["", ""])
+            if (matchRight.length < 2) setMatchRight(["", "", "", ""])
+            setMatchCorrect(matchLeft.map(() => -1))
           }
         }}
       >
@@ -349,6 +448,43 @@ export function QuestionEditorForm({
         <SelectContent>
           <SelectItem value="single_choice">Single Choice</SelectItem>
           <SelectItem value="multiple_choice">Multiple Choice</SelectItem>
+          <SelectItem value="match">Match (drag and drop)</SelectItem>
+        </SelectContent>
+      </Select>
+    </div>
+  )
+
+  const difficultyField = (
+    <div className="space-y-2">
+      <label className="text-sm font-medium">Difficulty</label>
+      <Select value={difficulty} onValueChange={(v) => setDifficulty(v as QuestionDifficulty)}>
+        <SelectTrigger>
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          {QUESTION_DIFFICULTY_OPTIONS.map((opt) => (
+            <SelectItem key={opt.value} value={opt.value}>
+              {opt.label}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+    </div>
+  )
+
+  const languageField = (
+    <div className="space-y-2">
+      <label className="text-sm font-medium">Language</label>
+      <Select value={language} onValueChange={(v) => setLanguage(v as QuestionLanguage)}>
+        <SelectTrigger>
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          {QUESTION_LANGUAGE_OPTIONS.map((opt) => (
+            <SelectItem key={opt.value} value={opt.value}>
+              {opt.label}
+            </SelectItem>
+          ))}
         </SelectContent>
       </Select>
     </div>
@@ -377,7 +513,8 @@ export function QuestionEditorForm({
   const pointsField = (
     <div className="space-y-2">
       <label className="text-sm font-medium">
-        Points <span className="text-destructive">*</span>
+        {questionType === "match" ? "Points per correct match" : "Points"}{" "}
+        <span className="text-destructive">*</span>
       </label>
       <Input
         type="number"
@@ -390,43 +527,191 @@ export function QuestionEditorForm({
         className={layout === "split" ? "w-full" : "w-24"}
         required
       />
+      {questionType === "match" && matchLeft.length > 0 && (
+        <p className="text-xs text-muted-foreground">
+          Max score for this question: {matchLeft.length * points} pts ({matchLeft.length} sections ×{" "}
+          {points})
+        </p>
+      )}
     </div>
   )
 
-  const questionToolSettings = (
-    <div className="space-y-3">
-      <FormSwitchRow
-        title="Shuffle answer options"
-        description="Randomize answer order for students (same order if they leave and return)."
-        checked={shuffleAnswerOptions}
-        onCheckedChange={setShuffleAnswerOptions}
-      />
-      <FormSwitchRow
-        title="Add calculator"
-        description="Show an in-app engineering calculator while taking a test."
-        checked={showCalculator}
-        onCheckedChange={setShowCalculator}
-      />
-      <FormSwitchRow
-        title="Add Periodic table"
-        description="Show a periodic table reference on the question while taking a test."
-        checked={showPeriodicTable}
-        onCheckedChange={setShowPeriodicTable}
-      />
+  const setMatchLeftCount = (count: number) => {
+    const n = Math.max(1, Math.min(12, count))
+    setMatchLeft((prev) => {
+      const next = [...prev]
+      while (next.length < n) next.push("")
+      return next.slice(0, n)
+    })
+    setMatchCorrect((prev) => {
+      const next = [...prev]
+      while (next.length < n) next.push(-1)
+      return dedupeMatchMapping(next.slice(0, n))
+    })
+  }
+
+  const setMatchRightCount = (count: number) => {
+    const n = Math.max(2, Math.min(16, count))
+    setMatchRight((prev) => {
+      const next = [...prev]
+      while (next.length < n) next.push("")
+      return next.slice(0, n)
+    })
+    setMatchCorrect((prev) => dedupeMatchMapping(prev.map((i) => (i >= n ? -1 : i))))
+  }
+
+  useEffect(() => {
+    if (questionType !== "match") return
+    setMatchCorrect((prev) => {
+      const next = dedupeMatchMapping(prev)
+      return next.every((v, i) => v === prev[i]) ? prev : next
+    })
+  }, [questionType, matchLeft.length, matchRight.length])
+
+  const matchBlock = (
+    <div className="space-y-6">
+      <div className="grid gap-4 sm:grid-cols-2">
+        <div className="space-y-2">
+          <label className="text-sm font-medium">Number of prompts</label>
+          <Input
+            type="number"
+            min={1}
+            max={12}
+            value={matchLeft.length}
+            onChange={(e) => setMatchLeftCount(parseInt(e.target.value, 10) || 1)}
+          />
+        </div>
+        <div className="space-y-2">
+          <label className="text-sm font-medium">Number of answer choices</label>
+          <Input
+            type="number"
+            min={2}
+            max={16}
+            value={matchRight.length}
+            onChange={(e) => setMatchRightCount(parseInt(e.target.value, 10) || 2)}
+          />
+        </div>
+      </div>
+
+      <div className="space-y-3">
+        <label className="text-sm font-medium">
+          Prompts (left column) <span className="text-destructive">*</span>
+        </label>
+        {matchLeft.map((text, i) => (
+          <Textarea
+            key={`left-${i}`}
+            placeholder={`Prompt ${String.fromCharCode(65 + i)}`}
+            value={text}
+            onChange={(e) => {
+              const next = [...matchLeft]
+              next[i] = e.target.value
+              setMatchLeft(next)
+            }}
+            rows={2}
+          />
+        ))}
+      </div>
+
+      <div className="space-y-3">
+        <label className="text-sm font-medium">
+          Answer choices (draggable pool) <span className="text-destructive">*</span>
+        </label>
+        {matchRight.map((text, i) => (
+          <Input
+            key={`right-${i}`}
+            placeholder={`Choice ${i + 1}`}
+            value={text}
+            onChange={(e) => {
+              const next = [...matchRight]
+              next[i] = e.target.value
+              setMatchRight(next)
+            }}
+          />
+        ))}
+      </div>
+
+      <div className="space-y-3">
+        <label className="text-sm font-medium">
+          Correct mapping <span className="text-destructive">*</span>
+        </label>
+        <p className="text-xs text-muted-foreground">
+          For each prompt, choose one answer. Each choice can only be used once.
+        </p>
+        {matchLeft.map((leftText, i) => {
+          const availableChoices = matchRight
+            .map((opt, j) => ({ opt, j }))
+            .filter(
+              ({ j }) =>
+                matchCorrect[i] === j ||
+                isRightIndexAvailableForSlot(matchCorrect, j, i),
+            )
+
+          return (
+            <div
+              key={`map-${i}`}
+              className="flex flex-col gap-2 rounded-lg border border-border/80 p-3 sm:flex-row sm:items-center"
+            >
+              <span
+                className="min-w-0 flex-1 truncate text-sm font-medium"
+                title={leftText || `Prompt ${i + 1}`}
+              >
+                {leftText.trim() ? leftText : `Prompt ${String.fromCharCode(65 + i)}`}
+              </span>
+              <Select
+                value={matchCorrect[i] >= 0 ? String(matchCorrect[i]) : ""}
+                onValueChange={(v) => {
+                  const picked = parseInt(v, 10)
+                  if (!Number.isInteger(picked) || picked < 0) return
+                  if (!isRightIndexAvailableForSlot(matchCorrect, picked, i)) return
+                  setMatchCorrect((prev) => assignMatchMapping(prev, i, picked))
+                }}
+              >
+                <SelectTrigger className="w-full sm:w-56">
+                  <SelectValue
+                    placeholder={
+                      availableChoices.length === 0
+                        ? "No choices left"
+                        : "Select correct choice"
+                    }
+                  />
+                </SelectTrigger>
+                <SelectContent>
+                  {availableChoices.length === 0 ? (
+                    <p className="px-2 py-3 text-sm text-muted-foreground">
+                      All choices are already assigned to other prompts.
+                    </p>
+                  ) : (
+                    availableChoices.map(({ opt, j }) => (
+                      <SelectItem key={j} value={String(j)} disabled={!opt.trim()}>
+                        {opt.trim() || `Choice ${j + 1}`}
+                      </SelectItem>
+                    ))
+                  )}
+                </SelectContent>
+              </Select>
+            </div>
+          )
+        })}
+      </div>
     </div>
   )
+
 
   const attributesSidebar = (
     <div className="space-y-4">
-      {mathModeToggle}
+      {questionType !== "match" && mathModeToggle}
       {typeField}
+      {languageField}
+      {difficultyField}
       {subjectField}
       {pointsField}
-      {questionToolSettings}
     </div>
   )
 
-  const optionsBlock = (
+  const optionsBlock =
+    questionType === "match" ? (
+      matchBlock
+    ) : (
     <div className="space-y-2">
       <label className="text-sm font-medium">
         {useMathMode
@@ -516,7 +801,7 @@ export function QuestionEditorForm({
         Add Option
       </Button>
     </div>
-  )
+    )
 
   const footerBlock = (
     <>
@@ -556,18 +841,18 @@ export function QuestionEditorForm({
 
   return (
     <form onSubmit={handleSubmit} className="space-y-6">
-      {mathModeToggle}
+      {questionType !== "match" && mathModeToggle}
 
       {stemBlock}
 
-      <div className="grid gap-4 sm:grid-cols-2">
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
         {typeField}
+        {languageField}
+        {difficultyField}
         {subjectField}
       </div>
 
       {pointsField}
-
-      {questionToolSettings}
 
       {optionsBlock}
 

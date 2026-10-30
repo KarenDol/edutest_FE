@@ -23,7 +23,7 @@ type AdminSubmission = {
   max_score: number
   percentage: number
   submitted_at: string | null
-  profiles: { name: string | null; email: string | null }
+  profiles: { name: string | null; email: string | null; phone?: string | null }
   tests: { title: string | null; subjects: { name: string } | null }
 }
 
@@ -91,7 +91,7 @@ export default function ResultsPage() {
                     <TableCell>
                       <div>
                         <p className="font-medium">{submission.profiles?.name || t("unknownStudent")}</p>
-                        <p className="text-sm text-muted-foreground">{submission.profiles?.email}</p>
+                        <p className="text-sm text-muted-foreground">{submission.profiles?.phone ?? submission.profiles?.email}</p>
                       </div>
                     </TableCell>
                     <TableCell className="font-medium">

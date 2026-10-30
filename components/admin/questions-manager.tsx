@@ -1,6 +1,6 @@
 "use client"
 
-import { useState } from "react"
+import { useMemo, useState } from "react"
 import { Link } from "@/i18n/navigation"
 import { apiClientJson } from "@/lib/client-api"
 import { Button } from "@/components/ui/button"
@@ -22,6 +22,12 @@ import {
 } from "@/components/ui/table"
 import { Badge } from "@/components/ui/badge"
 import { FileUp, Plus, Pencil, Trash2 } from "lucide-react"
+import { normalizeQuestionDifficulty } from "@/lib/question-difficulty"
+import {
+  normalizeQuestionLanguage,
+  QUESTION_LANGUAGE_OPTIONS,
+  questionLanguageLabel,
+} from "@/lib/question-languages"
 import type { Question, Subject } from "@/lib/types"
 
 interface QuestionsManagerProps {
@@ -32,9 +38,18 @@ interface QuestionsManagerProps {
 export function QuestionsManager({ initialQuestions, subjects }: QuestionsManagerProps) {
   const [questions, setQuestions] = useState(initialQuestions)
   const [filterSubject, setFilterSubject] = useState<string>("all")
+  const [filterLanguage, setFilterLanguage] = useState<string>("all")
 
-  const filteredQuestions =
-    filterSubject === "all" ? questions : questions.filter((q) => q.subject_id === filterSubject)
+  const filteredQuestions = useMemo(() => {
+    return questions.filter((q) => {
+      if (filterSubject !== "all" && q.subject_id !== filterSubject) return false
+      if (filterLanguage !== "all") {
+        const lang = normalizeQuestionLanguage(q.language)
+        if (lang !== filterLanguage) return false
+      }
+      return true
+    })
+  }, [questions, filterSubject, filterLanguage])
 
   const handleDelete = async (id: string) => {
     if (!confirm("Are you sure you want to delete this question?")) return
@@ -47,9 +62,9 @@ export function QuestionsManager({ initialQuestions, subjects }: QuestionsManage
     <Card>
       <CardHeader className="flex flex-row items-center justify-between gap-4">
         <CardTitle>All Questions</CardTitle>
-        <div className="flex items-center gap-4">
+        <div className="flex flex-wrap items-center gap-3">
           <Select value={filterSubject} onValueChange={setFilterSubject}>
-            <SelectTrigger className="w-48">
+            <SelectTrigger className="w-44">
               <SelectValue placeholder="Filter by subject" />
             </SelectTrigger>
             <SelectContent>
@@ -57,6 +72,19 @@ export function QuestionsManager({ initialQuestions, subjects }: QuestionsManage
               {subjects.map((subject) => (
                 <SelectItem key={subject.id} value={subject.id}>
                   {subject.name}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <Select value={filterLanguage} onValueChange={setFilterLanguage}>
+            <SelectTrigger className="w-40">
+              <SelectValue placeholder="Filter by language" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All Languages</SelectItem>
+              {QUESTION_LANGUAGE_OPTIONS.map((opt) => (
+                <SelectItem key={opt.value} value={opt.value}>
+                  {opt.label}
                 </SelectItem>
               ))}
             </SelectContent>
@@ -91,6 +119,8 @@ export function QuestionsManager({ initialQuestions, subjects }: QuestionsManage
               <TableRow>
                 <TableHead className="w-[48%] min-w-0">Question</TableHead>
                 <TableHead className="min-w-0">Subject</TableHead>
+                <TableHead className="w-24">Language</TableHead>
+                <TableHead className="w-16">Level</TableHead>
                 <TableHead className="w-24">Type</TableHead>
                 <TableHead className="w-14">Points</TableHead>
                 <TableHead className="w-28 shrink-0 text-right">Actions</TableHead>
@@ -112,8 +142,20 @@ export function QuestionsManager({ initialQuestions, subjects }: QuestionsManage
                     )}
                   </TableCell>
                   <TableCell>
+                    <Badge variant="secondary">
+                      {questionLanguageLabel(normalizeQuestionLanguage(question.language))}
+                    </Badge>
+                  </TableCell>
+                  <TableCell>
+                    <Badge variant="outline">{normalizeQuestionDifficulty(question.difficulty)}</Badge>
+                  </TableCell>
+                  <TableCell>
                     <Badge variant="outline">
-                      {question.question_type === "single_choice" ? "Single" : "Multiple"}
+                      {question.question_type === "single_choice"
+                        ? "Single"
+                        : question.question_type === "match"
+                          ? "Match"
+                          : "Multiple"}
                     </Badge>
                   </TableCell>
                   <TableCell>{question.points}</TableCell>
@@ -133,7 +175,9 @@ export function QuestionsManager({ initialQuestions, subjects }: QuestionsManage
           </Table>
         ) : (
           <p className="py-8 text-center text-muted-foreground">
-            No questions yet. Add your first question to get started.
+            {questions.length === 0
+              ? "No questions yet. Add your first question to get started."
+              : "No questions match the current filters."}
           </p>
         )}
       </CardContent>

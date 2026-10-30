@@ -18,28 +18,15 @@ import { XPatternBackdrop } from '@/components/x-pattern-backdrop'
 import { getPublicApiBase } from '@/lib/public-api'
 import { setAccessToken } from '@/lib/auth-token'
 import { roleFromAccessToken } from '@/lib/jwt-role'
+import { formatApiDetail } from '@/lib/api-detail'
 
 const GOOGLE_CID = process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID ?? ''
-
-function formatApiDetail(detail: unknown, fallback: string): string {
-  if (typeof detail === 'string') return detail
-  if (Array.isArray(detail)) {
-    const parts = detail.map((item) => {
-      if (item && typeof item === 'object' && 'msg' in item) {
-        return String((item as { msg: unknown }).msg)
-      }
-      return JSON.stringify(item)
-    })
-    const joined = parts.filter(Boolean).join(' ')
-    return joined || fallback
-  }
-  return fallback
-}
 
 function LoginShell() {
   const t = useTranslations('Auth')
   const locale = useLocale()
-  const [email, setEmail] = useState('')
+  // Phone number for students; email still accepted for admins and older accounts.
+  const [login, setLogin] = useState('')
   const [password, setPassword] = useState('')
   const [showPassword, setShowPassword] = useState(false)
   const [rememberMe, setRememberMe] = useState(false)
@@ -61,7 +48,7 @@ function LoginShell() {
       const res = await fetch(`${base}/auth/login`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, password, remember_me: rememberMe }),
+        body: JSON.stringify({ login, password, remember_me: rememberMe }),
       })
       const raw = await res.text()
       if (!res.ok) {
@@ -91,7 +78,7 @@ function LoginShell() {
   }
 
   const handleResendVerification = async () => {
-    if (!email.trim() || !password) {
+    if (!login.includes('@') || !password) {
       toast.error(t('errorGeneric'))
       return
     }
@@ -101,7 +88,7 @@ function LoginShell() {
       const res = await fetch(`${base}/auth/resend-verification`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, password }),
+        body: JSON.stringify({ email: login.trim(), password }),
       })
       const raw = await res.text()
       if (!res.ok) {
@@ -191,16 +178,16 @@ function LoginShell() {
               )}
 
               <div className="space-y-2">
-                <Label htmlFor="email">{t('email')}</Label>
+                <Label htmlFor="login">{t('phoneOrEmail')}</Label>
                 <Input
-                  id="email"
-                  type="email"
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  placeholder={t('emailPlaceholder')}
+                  id="login"
+                  type="text"
+                  value={login}
+                  onChange={(e) => setLogin(e.target.value)}
+                  placeholder={t('phonePlaceholder')}
                   required
                   disabled={loading}
-                  autoComplete="email"
+                  autoComplete="username"
                 />
               </div>
 

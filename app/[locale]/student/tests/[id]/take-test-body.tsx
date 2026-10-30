@@ -5,12 +5,14 @@ import { useParams, useRouter } from "next/navigation"
 import { apiClientJson } from "@/lib/client-api"
 import { Spinner } from "@/components/ui/spinner"
 import { TestTakingInterface } from "@/components/student/test-taking-interface"
-import type { Question, Submission, Test } from "@/lib/types"
+import type { Question, Submission, Test, TestSection } from "@/lib/types"
 
 type TestPayload = Test & {
   subjects: { name: string } | null
+  test_sections?: TestSection[]
   test_questions: {
     id: string
+    section_id?: string | null
     question_order: number
     questions: {
       id: string
@@ -69,14 +71,19 @@ export default function TakeTestBody() {
   const { test, existingSubmission } = payload
   const sortedQuestions = test.test_questions
     .sort((a, b) => a.question_order - b.question_order)
-    .map((tq) => tq.questions)
-    .filter(Boolean) as unknown as Question[]
+    .map((tq) => {
+      const q = tq.questions
+      if (!q) return null
+      return { ...q, section_id: tq.section_id ?? null }
+    })
+    .filter(Boolean) as (Question & { section_id?: string | null })[]
 
   return (
     <div className="-mx-6 -my-8 min-h-screen bg-background md:-mx-10 md:-my-10">
       <TestTakingInterface
         test={{
           ...test,
+          test_sections: test.test_sections,
           questions: sortedQuestions,
         }}
         existingSubmission={existingSubmission}

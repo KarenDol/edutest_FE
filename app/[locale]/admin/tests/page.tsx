@@ -3,11 +3,12 @@
 import { useEffect, useState } from "react"
 import { apiClientJson } from "@/lib/client-api"
 import { TestsManager } from "@/components/admin/tests-manager"
-import type { Question, Subject, Test } from "@/lib/types"
+import type { Subject, Test, TestSection } from "@/lib/types"
 import { Spinner } from "@/components/ui/spinner"
 
 type TestWithRelations = Test & {
   subjects: Subject | null
+  test_sections?: TestSection[]
   test_questions: {
     id: string
     question_order: number
@@ -18,27 +19,23 @@ type TestWithRelations = Test & {
 export default function TestsPage() {
   const [tests, setTests] = useState<TestWithRelations[] | null>(null)
   const [subjects, setSubjects] = useState<Subject[] | null>(null)
-  const [questions, setQuestions] = useState<(Question & { subjects: Subject | null })[] | null>(null)
 
   useEffect(() => {
     let cancelled = false
     ;(async () => {
       try {
-        const [tList, sList, qList] = await Promise.all([
+        const [tList, sList] = await Promise.all([
           apiClientJson<TestWithRelations[]>("/tests"),
           apiClientJson<Subject[]>("/subjects"),
-          apiClientJson<(Question & { subjects: Subject | null })[]>("/questions"),
         ])
         if (!cancelled) {
           setTests(tList)
           setSubjects(sList)
-          setQuestions(qList)
         }
       } catch {
         if (!cancelled) {
           setTests([])
           setSubjects([])
-          setQuestions([])
         }
       }
     })()
@@ -47,7 +44,7 @@ export default function TestsPage() {
     }
   }, [])
 
-  if (!tests || !subjects || !questions) {
+  if (!tests || !subjects) {
     return (
       <div className="flex min-h-[320px] items-center justify-center p-8">
         <Spinner className="h-8 w-8" />
@@ -58,11 +55,13 @@ export default function TestsPage() {
   return (
     <div className="p-8">
       <div className="mb-8">
-        <h1 className="text-3xl font-bold text-foreground">Tests</h1>
-        <p className="text-muted-foreground mt-1">Create and manage mock tests</p>
+        <h1 className="text-3xl font-bold text-foreground">Сборщик тестов</h1>
+        <p className="text-muted-foreground mt-1">
+          Секции с таймером — случайный подбор из банка или ручной выбор вопросов
+        </p>
       </div>
 
-      <TestsManager initialTests={tests} subjects={subjects} questions={questions} />
+      <TestsManager initialTests={tests} subjects={subjects} />
     </div>
   )
 }

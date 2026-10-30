@@ -61,7 +61,7 @@ export default function AdminQuestionReportsPage() {
               <CardContent className="space-y-2 text-sm">
                 <p>
                   <span className="text-muted-foreground">{t("student")}: </span>
-                  {r.reporter?.name || r.reporter?.email || "—"}
+                  {r.reporter?.name || r.reporter?.phone || r.reporter?.email || "—"}
                 </p>
                 <p className="line-clamp-2">
                   <span className="text-muted-foreground">{t("question")}: </span>

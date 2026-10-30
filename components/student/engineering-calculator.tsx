@@ -3,6 +3,7 @@
 import { useCallback, useMemo, useState } from "react"
 import { Parser } from "expr-eval"
 import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
 
 function formatResult(n: number): string {
   if (!Number.isFinite(n)) return "Undefined"
@@ -88,17 +89,28 @@ export function EngineeringCalculator() {
 
   return (
     <div className="space-y-3">
-      <div className="rounded-md border border-input bg-muted/30 px-3 py-2">
+      <div className="space-y-2 rounded-md border border-input bg-muted/30 px-3 py-2">
         <p className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
-          Expression (radians; use deg(·) for degrees, e.g. sin(deg(90)))
+          Type or tap (radians; use deg(·) for degrees, e.g. sin(deg(90)))
         </p>
-        <div
-          className="mt-1 min-h-[2.75rem] break-all font-mono text-right text-lg leading-snug text-foreground"
-          aria-live="polite"
-        >
-          {expr || "0"}
-        </div>
-        {error ? <p className="mt-1 text-xs text-destructive">{error}</p> : null}
+        <Input
+          value={expr}
+          onChange={(e) => {
+            setError(null)
+            setExpr(e.target.value)
+          }}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault()
+              evalExpr()
+            }
+          }}
+          className="font-mono text-right text-base"
+          placeholder="e.g. 2*sin(deg(30))"
+          autoComplete="off"
+          spellCheck={false}
+        />
+        {error ? <p className="text-xs text-destructive">{error}</p> : null}
       </div>
 
       <div className="grid grid-cols-6 gap-1.5">

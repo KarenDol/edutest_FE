@@ -1,4 +1,7 @@
 import { getAccessToken } from "@/lib/auth-token"
+import { normalizeQuestionDifficulty, type QuestionDifficulty } from "@/lib/question-difficulty"
+import { restoreLiteralNewlines } from "@/lib/text-breaks"
+import { normalizeQuestionLanguage, type QuestionLanguage } from "@/lib/question-languages"
 import { getPublicApiBase } from "@/lib/public-api"
 
 export interface ParsedPdfAnswer {
@@ -9,6 +12,9 @@ export interface ParsedPdfAnswer {
 export interface ParsedPdfQuestion {
   content: string
   answers: ParsedPdfAnswer[]
+  language?: string
+  difficulty?: string
+  image_urls?: string[]
 }
 
 export interface DraftImportQuestion {
@@ -20,6 +26,9 @@ export interface DraftImportQuestion {
   points: number
   approved: boolean
   use_math: boolean
+  language: QuestionLanguage
+  difficulty: QuestionDifficulty
+  image_urls: string[]
 }
 
 export interface ImportProgressEvent {
@@ -42,7 +51,12 @@ export function loadDraftQuestions(): DraftImportQuestion[] {
     const raw = JSON.parse(sessionStorage.getItem(STORAGE_KEY) || "[]") as DraftImportQuestion[]
     return raw.map((d) => ({
       ...d,
+      question_text: restoreLiteralNewlines(d.question_text ?? ""),
+      options: (d.options ?? []).map((option) => restoreLiteralNewlines(option)),
       use_math: d.use_math ?? (hasLatex(d.question_text) || d.options.some(hasLatex)),
+      language: normalizeQuestionLanguage(d.language),
+      difficulty: normalizeQuestionDifficulty(d.difficulty),
+      image_urls: cleanImageUrls(d.image_urls),
     }))
   } catch {
     return []
@@ -63,9 +77,21 @@ export function hasLatex(text: string): boolean {
   return /\$[^$]+\$/.test(text)
 }
 
+export function cleanImageUrls(value: unknown): string[] {
+  if (!Array.isArray(value)) return []
+  const out: string[] = []
+  for (const item of value) {
+    if (typeof item !== "string") continue
+    const url = item.trim()
+    if (!url.startsWith("/uploads/") || url.includes("..") || url.length > 2048) continue
+    if (!out.includes(url)) out.push(url)
+  }
+  return out.slice(0, 12)
+}
+
 /** Strip HTML wrappers but keep $...$ LaTeX segments from the model. */
 export function parseQuestionContent(raw: string): string {
-  const s = raw.trim()
+  const s = restoreLiteralNewlines(raw).trim()
   if (!s) return ""
   if (hasLatex(s) && !/<[a-z][\s>]/i.test(s)) return s
   return htmlToPlain(s)
@@ -111,7 +137,7 @@ export function draftValidationMessage(d: DraftImportQuestion): string | null {
 }
 
 export function normalizeParsedQuestion(raw: ParsedPdfQuestion): DraftImportQuestion | null {
-  const question_text = parseQuestionContent(raw.content ?? "")
+  const question_text = parseQuestionContent(raw.content ?? "").replace(/\[\[FIGURE_\d+\]\]/gi, "").trim()
   if (!question_text) return null
 
   const kept = (raw.answers ?? [])
@@ -137,6 +163,9 @@ export function normalizeParsedQuestion(raw: ParsedPdfQuestion): DraftImportQues
     points: 1,
     approved: false,
     use_math,
+    language: normalizeQuestionLanguage(raw.language),
+    difficulty: normalizeQuestionDifficulty(raw.difficulty),
+    image_urls: cleanImageUrls(raw.image_urls),
   }
 }
 

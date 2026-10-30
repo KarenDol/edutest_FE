@@ -12,6 +12,7 @@ import {
   SubmissionResultReview,
   type SubmissionDetail,
 } from "@/components/submission-result-review"
+import { ProctoringReview } from "@/components/admin/proctoring-review"
 
 export default function AdminResultIdBody() {
   const params = useParams()
@@ -54,7 +55,7 @@ export default function AdminResultIdBody() {
   }
 
   const name = submission.profiles?.name || t("unknownStudent")
-  const email = submission.profiles?.email
+  const email = submission.profiles?.phone ?? submission.profiles?.email
 
   return (
     <div className="space-y-10 px-6 py-8 md:px-10 md:py-10">
@@ -79,6 +80,8 @@ export default function AdminResultIdBody() {
       </div>
 
       <SubmissionResultReview submission={submission} />
+
+      <ProctoringReview submissionId={submission.id} />
 
       <div className="flex justify-center">
         <Button variant="outline" asChild>

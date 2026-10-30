@@ -16,7 +16,7 @@ type AdminDashboard = {
     id: string
     percentage: number
     submitted_at: string | null
-    profiles: { name: string | null; email: string | null }
+    profiles: { name: string | null; email: string | null; phone?: string | null }
     tests: { title: string | null }
   }[]
 }

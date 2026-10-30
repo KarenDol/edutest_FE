@@ -21,17 +21,74 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog"
 import { Clock, ChevronLeft, ChevronRight, Flag } from "lucide-react"
-import type { Question, Test, Submission } from "@/lib/types"
-import { MathOptionReadonly, MathQuestionStemView } from "@/components/math-question-view"
-import { QuestionReferenceTools } from "@/components/student/question-reference-tools"
+import type { Question, Test, Submission, TestSection } from "@/lib/types"
+import { restoreLiteralNewlines } from "@/lib/text-breaks"
+import { hasRenderedMath, MathOptionReadonly, MathQuestionStemView } from "@/components/math-question-view"
+import { TestReferenceTools } from "@/components/student/test-reference-tools"
 import { seededOptionIndices } from "@/lib/seeded-shuffle"
+import {
+  getMatchMaxPoints,
+  isMatchAnswerComplete,
+  isMatchQuestion,
+  normalizeMatchAnswers,
+  parseMatchCorrectAnswers,
+  parseMatchOptions,
+  scoreMatchAnswer,
+} from "@/lib/match-question"
+import { MatchQuestionFromOptions } from "@/components/student/match-question"
+import { ProctoringWidget } from "@/components/student/proctoring-widget"
+import { DraggableFloat } from "@/components/student/draggable-float"
+import {
+  formatTimecode,
+  flushChunkQueue,
+  PROCTORING_REPORT,
+  sendProctoringReport,
+  type ProctoringSource,
+} from "@/lib/proctoring"
+
+type QuestionWithSection = Question & { section_id?: string | null }
+
+interface SectionRuntime {
+  id: string
+  name: string
+  duration_minutes: number
+  questionIndices: number[]
+}
 
 interface TestTakingInterfaceProps {
   test: Test & {
-    questions: Question[]
+    questions: QuestionWithSection[]
+    test_sections?: TestSection[]
     subjects: { name: string } | null
   }
   existingSubmission: Submission | null
+}
+
+function buildSectionRuntimes(
+  questions: QuestionWithSection[],
+  testSections: TestSection[] | undefined,
+  durationMinutes: number | null,
+): SectionRuntime[] {
+  if (testSections && testSections.length > 0) {
+    const sorted = [...testSections].sort((a, b) => a.section_order - b.section_order)
+    return sorted.map((sec) => ({
+      id: sec.id,
+      name: sec.name,
+      duration_minutes: sec.duration_minutes,
+      questionIndices: questions
+        .map((q, i) => ({ q, i }))
+        .filter(({ q }) => q.section_id === sec.id)
+        .map(({ i }) => i),
+    }))
+  }
+  return [
+    {
+      id: "default",
+      name: "Тест",
+      duration_minutes: durationMinutes || 60,
+      questionIndices: questions.map((_, i) => i),
+    },
+  ]
 }
 
 function normalizeAnswers(raw: Record<string, unknown> | undefined): Record<string, number[]> {
@@ -54,25 +111,62 @@ export function TestTakingInterface({
     normalizeAnswers(existingSubmission?.answers as Record<string, unknown> | undefined),
   )
   const [flaggedQuestions, setFlaggedQuestions] = useState<Set<string>>(new Set())
-  const [timeRemaining, setTimeRemaining] = useState((test.duration_minutes || 60) * 60)
   const [showSubmitDialog, setShowSubmitDialog] = useState(false)
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [submissionId, setSubmissionId] = useState<string | null>(existingSubmission?.id || null)
   const router = useRouter()
   const submittedRef = useRef(false)
+  const startedAtRef = useRef(Date.now())
+  const proctoringVersion = test.proctoring_version ?? 0
+  const [cameraOk, setCameraOk] = useState(proctoringVersion === 0)
+  const [screenOk, setScreenOk] = useState(proctoringVersion === 0)
+  const [examUnlocked, setExamUnlocked] = useState(proctoringVersion === 0)
+  const [aiStatus, setAiStatus] = useState<number | null>(null)
+  const [lostFocus, setLostFocus] = useState(false)
+  const [screenHint, setScreenHint] = useState<string | null>(null)
 
   const questions = test.questions
+  const sections = useMemo(
+    () => buildSectionRuntimes(questions, test.test_sections, test.duration_minutes),
+    [questions, test.test_sections, test.duration_minutes],
+  )
+
+  const initialSectionIndex = useMemo(() => {
+    for (let i = 0; i < sections.length; i++) {
+      if (sections[i].questionIndices.length > 0) return i
+    }
+    return 0
+  }, [sections])
+
+  const [currentSectionIndex, setCurrentSectionIndex] = useState(initialSectionIndex)
+  const [sectionTimesRemaining, setSectionTimesRemaining] = useState(() =>
+    sections.map((s) => s.duration_minutes * 60),
+  )
+  const [expiredSectionIndices, setExpiredSectionIndices] = useState<Set<number>>(new Set())
+
+  const currentSection = sections[currentSectionIndex] ?? sections[0]
   const currentQuestion = questions[currentQuestionIndex]
+  const sectionTimeRemaining = sectionTimesRemaining[currentSectionIndex] ?? 0
   const progress = ((currentQuestionIndex + 1) / questions.length) * 100
+  const hasMultipleSections = sections.length > 1
 
   const optionOrder = useMemo(() => {
     const q = currentQuestion
-    const n = q.options.length
-    if (!(q.shuffle_answer_options ?? false)) {
+    if (isMatchQuestion(q)) {
+      const { right } = parseMatchOptions(q.options)
+      const n = right.length
+      if (!(test.shuffle_answer_options ?? false)) {
+        return Array.from({ length: n }, (_, i) => i)
+      }
+      return seededOptionIndices(`${test.id}:${q.id}:match-right`, n)
+    }
+    const flat = Array.isArray(q.options) ? q.options : []
+    const n = flat.length
+    if (!(test.shuffle_answer_options ?? false)) {
       return Array.from({ length: n }, (_, i) => i)
     }
     return seededOptionIndices(`${test.id}:${q.id}`, n)
-  }, [test.id, currentQuestion.id, currentQuestion.shuffle_answer_options, currentQuestion.options.length])
+  }, [test.id, currentQuestion, test.shuffle_answer_options])
 
   useEffect(() => {
     const initSubmission = async () => {
@@ -109,18 +203,89 @@ export function TestTakingInterface({
   }, [saveAnswers])
 
   useEffect(() => {
+    if (examUnlocked) startedAtRef.current = Date.now()
+  }, [examUnlocked])
+
+  useEffect(() => {
+    if (proctoringVersion <= 0 || !examUnlocked) return
+    let away = false
+    let unfocusedSince = 0
+    const unfocused = () => document.visibilityState === "hidden" || !document.hasFocus()
+    const report = () => {
+      if (away) return
+      away = true
+      setLostFocus(true)
+      if (submissionId) {
+        void sendProctoringReport(submissionId, {
+          type: PROCTORING_REPORT.LOSE_FOCUS,
+          timecode: formatTimecode(startedAtRef.current),
+          description: document.visibilityState === "hidden" ? "tab_hidden" : "window_unfocused",
+        })
+      }
+    }
+    const tick = () => {
+      if (unfocused()) {
+        if (!unfocusedSince) unfocusedSince = Date.now()
+        if (Date.now() - unfocusedSince >= 1500) report()
+      } else {
+        unfocusedSince = 0
+        away = false
+        setLostFocus(false)
+      }
+    }
+    const interval = window.setInterval(tick, 400)
+    document.addEventListener("visibilitychange", tick)
+    window.addEventListener("blur", tick)
+    window.addEventListener("focus", tick)
+    return () => {
+      window.clearInterval(interval)
+      document.removeEventListener("visibilitychange", tick)
+      window.removeEventListener("blur", tick)
+      window.removeEventListener("focus", tick)
+    }
+  }, [proctoringVersion, examUnlocked, submissionId])
+
+  const onProctoringAccess = (source: ProctoringSource, status: 0 | 1 | 2) => {
+    if (source === "web-camera") setCameraOk(status === 1)
+    if (source === "screen") setScreenOk(status === 1)
+  }
+
+  const advanceAfterSectionExpired = useCallback(
+    (sectionIdx: number) => {
+      setExpiredSectionIndices((prev) => new Set(prev).add(sectionIdx))
+      const nextIdx = sectionIdx + 1
+      if (nextIdx < sections.length && sections[nextIdx].questionIndices.length > 0) {
+        setCurrentSectionIndex(nextIdx)
+        setCurrentQuestionIndex(sections[nextIdx].questionIndices[0])
+        return
+      }
+      if (!submittedRef.current) {
+        setShowSubmitDialog(true)
+      }
+    },
+    [sections],
+  )
+
+  useEffect(() => {
+    if (!examUnlocked) return
+    if (expiredSectionIndices.has(currentSectionIndex)) return
+
     const timer = setInterval(() => {
-      setTimeRemaining((prev) => {
-        if (prev <= 1) {
-          handleSubmit()
-          return 0
+      setSectionTimesRemaining((prev) => {
+        const next = [...prev]
+        const left = next[currentSectionIndex] ?? 0
+        if (left <= 1) {
+          next[currentSectionIndex] = 0
+          advanceAfterSectionExpired(currentSectionIndex)
+          return next
         }
-        return prev - 1
+        next[currentSectionIndex] = left - 1
+        return next
       })
     }, 1000)
 
     return () => clearInterval(timer)
-  }, [])
+  }, [currentSectionIndex, expiredSectionIndices, advanceAfterSectionExpired, examUnlocked])
 
   const formatTime = (seconds: number) => {
     const mins = Math.floor(seconds / 60)
@@ -149,6 +314,76 @@ export function TestTakingInterface({
     }
   }
 
+  const questionSectionIndex = useMemo(() => {
+    const map = new Map<number, number>()
+    sections.forEach((sec, secIdx) => {
+      for (const qi of sec.questionIndices) {
+        map.set(qi, secIdx)
+      }
+    })
+    return map
+  }, [sections])
+
+  const goToQuestion = (index: number) => {
+    const secIdx = questionSectionIndex.get(index) ?? 0
+    if (expiredSectionIndices.has(secIdx)) return
+    setCurrentSectionIndex(secIdx)
+    setCurrentQuestionIndex(index)
+  }
+
+  const goNext = () => {
+    const indices = currentSection.questionIndices
+    const pos = indices.indexOf(currentQuestionIndex)
+    if (pos >= 0 && pos < indices.length - 1) {
+      setCurrentQuestionIndex(indices[pos + 1])
+      return
+    }
+    const nextSec = currentSectionIndex + 1
+    if (nextSec < sections.length && !expiredSectionIndices.has(nextSec)) {
+      const first = sections[nextSec].questionIndices[0]
+      if (first !== undefined) {
+        setCurrentSectionIndex(nextSec)
+        setCurrentQuestionIndex(first)
+      }
+    }
+  }
+
+  const goPrev = () => {
+    const indices = currentSection.questionIndices
+    const pos = indices.indexOf(currentQuestionIndex)
+    if (pos > 0) {
+      setCurrentQuestionIndex(indices[pos - 1])
+      return
+    }
+    const prevSec = currentSectionIndex - 1
+    if (prevSec >= 0 && !expiredSectionIndices.has(prevSec)) {
+      const prevIndices = sections[prevSec].questionIndices
+      const last = prevIndices[prevIndices.length - 1]
+      if (last !== undefined) {
+        setCurrentSectionIndex(prevSec)
+        setCurrentQuestionIndex(last)
+      }
+    }
+  }
+
+  const canGoPrev =
+    currentSection.questionIndices.indexOf(currentQuestionIndex) > 0 ||
+    (currentSectionIndex > 0 &&
+      !expiredSectionIndices.has(currentSectionIndex - 1))
+
+  const canGoNext =
+    (() => {
+      const indices = currentSection.questionIndices
+      const pos = indices.indexOf(currentQuestionIndex)
+      if (pos >= 0 && pos < indices.length - 1) return true
+      for (let s = currentSectionIndex + 1; s < sections.length; s++) {
+        if (!expiredSectionIndices.has(s) && sections[s].questionIndices.length > 0) {
+          return true
+        }
+      }
+      return false
+    })()
+
   const toggleFlag = () => {
     const newFlagged = new Set(flaggedQuestions)
     if (newFlagged.has(currentQuestion.id)) {
@@ -165,9 +400,20 @@ export function TestTakingInterface({
     setIsSubmitting(true)
 
     let totalScore = 0
-    const maxScore = questions.reduce((sum, q) => sum + q.points, 0)
+    const maxScore = questions.reduce(
+      (sum, q) => sum + (isMatchQuestion(q) ? getMatchMaxPoints(q) : q.points),
+      0,
+    )
 
     questions.forEach((question) => {
+      if (isMatchQuestion(question)) {
+        const { left } = parseMatchOptions(question.options)
+        const correct = parseMatchCorrectAnswers(question.correct_answers, left.length)
+        const user = normalizeMatchAnswers(answers[question.id], left.length)
+        totalScore += scoreMatchAnswer(user, correct, question.points)
+        return
+      }
+
       const userAnswers = answers[question.id] || []
       const correctRaw = question.correct_answers as unknown[]
       const correctAnswers = correctRaw.map((a) =>
@@ -195,32 +441,140 @@ export function TestTakingInterface({
         submitted_at: new Date().toISOString(),
       }),
     })
+    if (proctoringVersion > 0) {
+      await flushChunkQueue(submissionId)
+    }
 
     router.push(`/student/results/${submissionId}`)
   }
 
-  const answeredCount = Object.keys(answers).filter((k) => answers[k] && answers[k].length > 0).length
+  const answeredCount = questions.filter((q) => {
+    const raw = answers[q.id]
+    if (isMatchQuestion(q)) {
+      const { left } = parseMatchOptions(q.options)
+      return isMatchAnswerComplete(normalizeMatchAnswers(raw, left.length), left.length)
+    }
+    return raw && raw.length > 0 && raw.some((n) => n >= 0)
+  }).length
+
+  const proctoringWidget = proctoringVersion > 0 && (
+    <ProctoringWidget
+      version={proctoringVersion}
+      submissionId={submissionId}
+      uploadingEnabled={Boolean(submissionId) && examUnlocked}
+      compact={examUnlocked}
+      onAccess={onProctoringAccess}
+      onScreenHint={setScreenHint}
+      onAiFaceCount={proctoringVersion === 3 ? setAiStatus : undefined}
+    />
+  )
+
+  const canStartProctoring = cameraOk && screenOk
 
   return (
     <div className="flex flex-col h-screen">
+      {proctoringVersion > 0 && (
+        <DraggableFloat
+          enabled={examUnlocked}
+          className={
+            examUnlocked
+              ? "z-50 w-[220px] space-y-2"
+              : "fixed left-1/2 top-[42%] z-50 w-max -translate-x-1/2"
+          }
+        >
+          {proctoringWidget}
+          {examUnlocked && (
+            <div className="space-y-2">
+              {lostFocus && (
+                <p className="rounded-lg bg-red-600 px-2.5 py-2 text-xs font-medium leading-snug text-white shadow-lg">
+                  Другая вкладка. Вернитесь к тесту.
+                </p>
+              )}
+              {proctoringVersion === 3 && aiStatus === 0 && (
+                <p className="rounded-lg bg-red-600 px-2.5 py-2 text-xs font-medium leading-snug text-white shadow-lg">
+                  Лицо не видно. Смотрите в камеру.
+                </p>
+              )}
+              {proctoringVersion === 3 && typeof aiStatus === "number" && aiStatus > 1 && aiStatus < 10 && (
+                <p className="rounded-lg bg-red-600 px-2.5 py-2 text-xs font-medium leading-snug text-white shadow-lg">
+                  Несколько лиц. Вы должны быть одни.
+                </p>
+              )}
+              {proctoringVersion === 3 && aiStatus === 100 && (
+                <p className="rounded-lg bg-red-600 px-2.5 py-2 text-xs font-medium leading-snug text-white shadow-lg">
+                  Камера отключена. Включите доступ снова.
+                </p>
+              )}
+              {proctoringVersion === 3 && aiStatus === 200 && (
+                <p className="rounded-lg bg-red-600 px-2.5 py-2 text-xs font-medium leading-snug text-white shadow-lg">
+                  Экран не транслируется. Поделитесь экраном снова.
+                </p>
+              )}
+            </div>
+          )}
+        </DraggableFloat>
+      )}
+      {proctoringVersion > 0 && !examUnlocked && (
+        <div className="fixed inset-0 z-40 flex flex-col items-center bg-background px-6 pt-16">
+          <div className="max-w-xl space-y-4 text-center">
+            <h1 className="text-2xl font-bold">{test.title}</h1>
+            <p className="text-muted-foreground">
+              Для этого теста включён прокторинг. Разрешите камеру и в диалоге демонстрации экрана
+              выберите вкладку «Весь экран» (весь монитор), не окно Chrome и не вкладку. Затем
+              нажмите «Начать тест». Не закрывайте панель «Этот экран демонстрируется» — иначе
+              запись остановится.
+            </p>
+            <div className="space-y-1 text-sm">
+              <p>
+                Камера: <b>{cameraOk ? "разрешена" : "нужно разрешить"}</b>
+              </p>
+              <p>
+                Экран:{" "}
+                <b>{screenOk ? "весь экран" : "нужно выбрать «Весь экран»"}</b>
+              </p>
+            </div>
+            {screenHint && (
+              <p className="rounded-lg bg-red-600 px-3 py-2 text-sm font-medium text-white">
+                {screenHint}
+              </p>
+            )}
+            <Button disabled={!canStartProctoring} onClick={() => setExamUnlocked(true)}>
+              {canStartProctoring ? "Начать тест" : "Ожидание разрешений…"}
+            </Button>
+          </div>
+        </div>
+      )}
       <header className="border-b bg-card px-6 py-4">
         <div className="flex items-center justify-between max-w-5xl mx-auto">
           <div>
             <h1 className="text-xl font-bold">{test.title}</h1>
-            {test.subjects?.name && (
+            {hasMultipleSections ? (
               <Badge variant="secondary" className="mt-1">
-                {test.subjects.name}
+                {currentSection.name}
               </Badge>
+            ) : (
+              test.subjects?.name && (
+                <Badge variant="secondary" className="mt-1">
+                  {test.subjects.name}
+                </Badge>
+              )
             )}
           </div>
           <div className="flex items-center gap-6">
-            <div className="flex items-center gap-2 text-muted-foreground">
-              <Clock className="h-5 w-5" />
-              <span
-                className={`font-mono text-lg ${timeRemaining < 300 ? "text-destructive" : ""}`}
-              >
-                {formatTime(timeRemaining)}
-              </span>
+            <div className="flex flex-col items-end gap-0.5">
+              <div className="flex items-center gap-2 text-muted-foreground">
+                <Clock className="h-5 w-5" />
+                <span
+                  className={`font-mono text-lg ${sectionTimeRemaining < 300 ? "text-destructive" : ""}`}
+                >
+                  {formatTime(sectionTimeRemaining)}
+                </span>
+              </div>
+              {hasMultipleSections && (
+                <span className="text-xs text-muted-foreground">
+                  Секция {currentSectionIndex + 1} из {sections.length}
+                </span>
+              )}
             </div>
             <Button onClick={() => setShowSubmitDialog(true)}>Submit Test</Button>
           </div>
@@ -258,20 +612,34 @@ export function TestTakingInterface({
                   />
                 </CardTitle>
                 <CardAction>
-                  <Badge variant="outline">{currentQuestion.points} pts</Badge>
+                  <Badge variant="outline">
+                    {isMatchQuestion(currentQuestion)
+                      ? `${getMatchMaxPoints(currentQuestion)} pts`
+                      : `${currentQuestion.points} pts`}
+                  </Badge>
                 </CardAction>
                 <p className="text-sm text-muted-foreground">
                   {currentQuestion.question_type === "single_choice"
                     ? "Select one answer"
-                    : "Select all that apply"}
+                    : currentQuestion.question_type === "match"
+                      ? "Drag each answer to the matching prompt"
+                      : "Select all that apply"}
                 </p>
-                <QuestionReferenceTools
-                  showCalculator={Boolean(currentQuestion.show_calculator)}
-                  showPeriodicTable={Boolean(currentQuestion.show_periodic_table)}
-                />
               </CardHeader>
               <CardContent className="space-y-3">
-                {currentQuestion.question_type === "single_choice" ? (
+                {currentQuestion.question_type === "match" ? (
+                  <MatchQuestionFromOptions
+                    options={currentQuestion.options}
+                    value={normalizeMatchAnswers(
+                      answers[currentQuestion.id],
+                      parseMatchOptions(currentQuestion.options).left.length,
+                    )}
+                    onChange={(mapping) =>
+                      setAnswers({ ...answers, [currentQuestion.id]: mapping })
+                    }
+                    rightOrder={optionOrder}
+                  />
+                ) : currentQuestion.question_type === "single_choice" ? (
                   <RadioGroup
                     className="space-y-3"
                     value={
@@ -287,7 +655,10 @@ export function TestTakingInterface({
                     }
                   >
                     {optionOrder.map((index) => {
-                      const option = currentQuestion.options[index] ?? ""
+                      const flatOpts = Array.isArray(currentQuestion.options)
+                        ? currentQuestion.options
+                        : []
+                      const option = restoreLiteralNewlines(flatOpts[index] ?? "")
                       const selected = (answers[currentQuestion.id] || [])[0] === index
                       const optionId = `answer-${currentQuestion.id}-${index}`
                       return (
@@ -302,9 +673,10 @@ export function TestTakingInterface({
                           <RadioGroupItem value={String(index)} id={optionId} />
                           <Label
                             htmlFor={optionId}
-                            className="min-w-0 flex-1 cursor-pointer text-base font-medium leading-relaxed"
+                            className="min-w-0 flex-1 cursor-pointer whitespace-pre-wrap text-base font-medium leading-relaxed"
                           >
-                            {currentQuestion.math ? (
+                            {currentQuestion.math &&
+                            hasRenderedMath(currentQuestion.math.options_latex[index] ?? option) ? (
                               <MathOptionReadonly
                                 latex={currentQuestion.math.options_latex[index] ?? option}
                               />
@@ -318,7 +690,10 @@ export function TestTakingInterface({
                   </RadioGroup>
                 ) : (
                   optionOrder.map((index) => {
-                    const option = currentQuestion.options[index] ?? ""
+                    const flatOpts = Array.isArray(currentQuestion.options)
+                      ? currentQuestion.options
+                      : []
+                    const option = restoreLiteralNewlines(flatOpts[index] ?? "")
                     const isSelected = (answers[currentQuestion.id] || []).includes(index)
                     return (
                       <button
@@ -332,8 +707,9 @@ export function TestTakingInterface({
                         }`}
                       >
                         <Checkbox checked={isSelected} />
-                        <span className="min-w-0 flex-1 text-base font-medium leading-relaxed">
-                          {currentQuestion.math ? (
+                        <span className="min-w-0 flex-1 whitespace-pre-wrap text-base font-medium leading-relaxed">
+                          {currentQuestion.math &&
+                          hasRenderedMath(currentQuestion.math.options_latex[index] ?? option) ? (
                             <MathOptionReadonly
                               latex={currentQuestion.math.options_latex[index] ?? option}
                             />
@@ -349,21 +725,12 @@ export function TestTakingInterface({
             </Card>
 
             <div className="flex items-center justify-between mt-6">
-              <Button
-                variant="outline"
-                onClick={() => setCurrentQuestionIndex((i) => Math.max(0, i - 1))}
-                disabled={currentQuestionIndex === 0}
-              >
+              <Button variant="outline" onClick={goPrev} disabled={!canGoPrev}>
                 <ChevronLeft className="h-4 w-4 mr-1" />
-                Previous
+                Назад
               </Button>
-              <Button
-                onClick={() =>
-                  setCurrentQuestionIndex((i) => Math.min(questions.length - 1, i + 1))
-                }
-                disabled={currentQuestionIndex === questions.length - 1}
-              >
-                Next
+              <Button onClick={goNext} disabled={!canGoNext}>
+                Далее
                 <ChevronRight className="h-4 w-4 ml-1" />
               </Button>
             </div>
@@ -375,32 +742,65 @@ export function TestTakingInterface({
           <p className="text-sm text-muted-foreground mb-4">
             {answeredCount} of {questions.length} answered
           </p>
-          <div className="grid grid-cols-5 gap-2">
-            {questions.map((q, index) => {
-              const isAnswered = answers[q.id] && answers[q.id].length > 0
-              const isFlagged = flaggedQuestions.has(q.id)
-              const isCurrent = index === currentQuestionIndex
+          <div className="space-y-4">
+            {sections.map((sec, secIdx) => (
+              <div key={sec.id}>
+                {hasMultipleSections && (
+                  <p
+                    className={`text-xs font-medium mb-2 ${
+                      expiredSectionIndices.has(secIdx)
+                        ? "text-muted-foreground line-through"
+                        : secIdx === currentSectionIndex
+                          ? "text-primary"
+                          : "text-muted-foreground"
+                    }`}
+                  >
+                    {sec.name}
+                    {expiredSectionIndices.has(secIdx) && " (время вышло)"}
+                  </p>
+                )}
+                <div className="grid grid-cols-5 gap-2">
+                  {sec.questionIndices.map((index) => {
+                    const q = questions[index]
+                    const isAnswered = isMatchQuestion(q)
+                      ? isMatchAnswerComplete(
+                          normalizeMatchAnswers(
+                            answers[q.id],
+                            parseMatchOptions(q.options).left.length,
+                          ),
+                          parseMatchOptions(q.options).left.length,
+                        )
+                      : answers[q.id] && answers[q.id].length > 0
+                    const isFlagged = flaggedQuestions.has(q.id)
+                    const isCurrent = index === currentQuestionIndex
+                    const isExpired = expiredSectionIndices.has(secIdx)
 
-              return (
-                <button
-                  key={q.id}
-                  type="button"
-                  onClick={() => setCurrentQuestionIndex(index)}
-                  className={`w-10 h-10 rounded-lg text-sm font-medium transition-colors relative ${
-                    isCurrent
-                      ? "bg-primary text-primary-foreground"
-                      : isAnswered
-                        ? "bg-accent text-accent-foreground"
-                        : "bg-muted hover:bg-muted/80"
-                  }`}
-                >
-                  {index + 1}
-                  {isFlagged && (
-                    <span className="absolute -top-1 -right-1 w-2 h-2 bg-warning rounded-full" />
-                  )}
-                </button>
-              )
-            })}
+                    return (
+                      <button
+                        key={q.id}
+                        type="button"
+                        disabled={isExpired}
+                        onClick={() => goToQuestion(index)}
+                        className={`w-10 h-10 rounded-lg text-sm font-medium transition-colors relative ${
+                          isExpired
+                            ? "bg-muted/40 text-muted-foreground cursor-not-allowed opacity-50"
+                            : isCurrent
+                              ? "bg-primary text-primary-foreground"
+                              : isAnswered
+                                ? "bg-accent text-accent-foreground"
+                                : "bg-muted hover:bg-muted/80"
+                        }`}
+                      >
+                        {index + 1}
+                        {isFlagged && (
+                          <span className="absolute -top-1 -right-1 w-2 h-2 bg-warning rounded-full" />
+                        )}
+                      </button>
+                    )
+                  })}
+                </div>
+              </div>
+            ))}
           </div>
         </aside>
       </div>
@@ -431,6 +831,11 @@ export function TestTakingInterface({
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      <TestReferenceTools
+        showCalculator={Boolean(test.show_calculator)}
+        showPeriodicTable={Boolean(test.show_periodic_table)}
+      />
     </div>
   )
 }
